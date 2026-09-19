@@ -18,12 +18,14 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100vh;
+        height: 100vh;
+    height: 100dvh;
   }
-    #stage {
+        #stage {
     position: relative;
-    width: min(96vw, calc(96vh * 5 / 3));
-    aspect-ratio: 5 / 3;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
   }
   #stage canvas {
     position: absolute;
@@ -138,16 +140,23 @@ const JOY_RADIUS = 50;
 const JOY_ZONE_W = 220, JOY_ZONE_H = 180;
 
 // ---- Boutons ----
-const shootBtn  = { x: W - 70,  y: H - 70,  r: 40 };
-const tackleBtn = { x: W - 150, y: H - 70,  r: 32 };
-const sprintBtn = { x: W - 110, y: H - 140, r: 32 };
-const passBtn   = { x: W - 230, y: H - 70,  r: 32 };
+let UI_W = W; // largeur réelle de l'interface (s'adapte à l'écran)
+const shootBtn  = { x: 0, y: H - 50,  r: 38 };
+const tackleBtn = { x: 0, y: H - 38,  r: 30 };
+const passBtn   = { x: 0, y: H - 106, r: 30 };
+const sprintBtn = { x: 0, y: H - 124, r: 30 };
+function layoutButtons() {
+  shootBtn.x  = UI_W - 52;
+  tackleBtn.x = UI_W - 132;
+  passBtn.x   = UI_W - 110;
+  sprintBtn.x = UI_W - 48;
+}
 
 function getPointerPos(e) {
   const rect = canvas.getBoundingClientRect();
   const touch = e.touches ? e.touches[0] : e;
   return {
-    x: (touch.clientX - rect.left) * (W / rect.width),
+    x: (touch.clientX - rect.left) * (canvas.width / rect.width),
     y: (touch.clientY - rect.top) * (H / rect.height)
   };
 }
@@ -230,7 +239,7 @@ const btnTouches = {}; // identifiant du doigt -> 'shoot' | 'sprint'
 function getTouchPos(t) {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: (t.clientX - rect.left) * (W / rect.width),
+    x: (t.clientX - rect.left) * (canvas.width / rect.width),
     y: (t.clientY - rect.top) * (H / rect.height)
   };
 }
@@ -589,6 +598,7 @@ function drawButtons() {
 }
 
 function drawHUD() {
+  const W = UI_W; // le score reste centré sur l'écran réel
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 22px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -632,15 +642,27 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b6e8);
 
 const camera = new THREE.PerspectiveCamera(45, W / H, 1, 500);
-camera.position.set(0, 46, 60);
+camera.position.set(0, 52, 48);
 camera.lookAt(0, 0, 2);
 camera.updateMatrixWorld();
 
 function resize3D() {
   const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
+
+  // Écran moins large que 5:3 : on élargit le champ de vision pour garder tout le terrain visible
+  const base = 5 / 3;
+  camera.fov = camera.aspect >= base ? 45
+    : 2 * Math.atan(Math.tan(45 * Math.PI / 360) * base / camera.aspect) * 180 / Math.PI;
   camera.updateProjectionMatrix();
+
+  // Interface 2D : même hauteur logique (480), largeur selon l'écran, donc sans déformation
+  canvas.width = Math.round(H * camera.aspect);
+  canvas.height = H;
+  UI_W = canvas.width;
+  layoutButtons();
 }
 window.addEventListener('resize', resize3D);
 resize3D();
@@ -744,9 +766,9 @@ function buildingMat(color, w, h) {
   return new THREE.MeshStandardMaterial({ map: t, roughness: 1 });
 }
 const palette = ['#e8743b', '#3b8ee8', '#f2c744', '#d9578a', '#5fbf8f'];
-for (let i = -7; i <= 7; i++) {
+for (let i = -10; i <= 10; i++) {
   const w = 12, d = 12, h = 16 + (((i * 37) % 5) + 5) % 5 * 5;
-  const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), buildingMat(palette[(i + 7) % palette.length], w, h));
+  const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), buildingMat(palette[(i + 10) % palette.length], w, h));
   b.position.set(i * 13, h / 2, -45);
   scene.add(b);
 }
@@ -821,7 +843,7 @@ function syncGK(gk, angle) {
 }
 function toScreen(x, y, h) {
   const v = new THREE.Vector3(wx(x), h, wz(y)).project(camera);
-  return { x: (v.x + 1) / 2 * W, y: (1 - v.y) / 2 * H };
+   return { x: (v.x + 1) / 2 * UI_W, y: (1 - v.y) / 2 * H };
 }
 
 function render3D(t) {
@@ -840,7 +862,7 @@ function render3D(t) {
 
 function render() {
   render3D(performance.now() / 1000);
-  ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, UI_W, H);
   drawPowerBar();
   drawJoystick();
   drawButtons();
