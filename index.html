@@ -80,7 +80,8 @@ const HOME_GOAL_X = 20;
 const AWAY_GOAL_X = W - 20;
 
 // ---- Joueur contrôlé ----
-const player = { x: 200, y: H / 2, r: 14, facingX: 1, facingY: 0, side: 'home', label: '10', color: '#f5c518' };
+const p10 = { x: 200, y: H / 2, r: 14, facingX: 1, facingY: 0, side: 'home', label: '10', color: '#f5c518', speed: 150, attackTimer: 0, anchorX: 350, anchorY: H / 2 - 100 };
+let player = p10; // joueur actuellement contrôlé
 
 // ---- Coéquipiers IA (anchorX/Y = où ils reviennent quand ils ne pressent/dribblent pas) ----
 const teammate1 = { x: 0, y: 0, r: 14, facingX: 1, facingY: 0, side: 'home', label: '7',  color: '#ffe082', speed: 150, attackTimer: 0, anchorX: W - 220, anchorY: H / 2 };
@@ -94,9 +95,9 @@ const opp3 = { x: 0, y: 0, r: 14, facingX: -1, facingY: 0, side: 'away', label: 
 const homeGK = { x: 34,     y: H / 2, r: 13, speed: 160 };
 const awayGK = { x: W - 34, y: H / 2, r: 13, speed: 160 };
 
-const homeField = [player, teammate1, teammate2];
+const homeField = [p10, teammate1, teammate2];
 const awayField = [opp1, opp2, opp3];
-const homeAI = [teammate1, teammate2];
+let homeAI = [teammate1, teammate2]; // équipiers gérés par l'IA (change selon qui est contrôlé)
 const awayAI = [opp1, opp2, opp3];
 
 const ball = { x: 0, y: 0, r: 8, vx: 0, vy: 0, carrier: player, passTarget: null };
@@ -184,8 +185,7 @@ function playerTackle() {
     const dx = ball.x - player.x, dy = ball.y - player.y;
     if (Math.sqrt(dx * dx + dy * dy) < TACKLE_RANGE) {
       ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
-      tackleCooldown = 1.0; defenderFreeze = 0.6;
-      message = 'RÉCUPÉRÉ !'; messageTimer = 0.8;
+            tackleCooldown = 1.0;
     }
     return;
   }
@@ -193,8 +193,7 @@ function playerTackle() {
     const dx = ball.carrier.x - player.x, dy = ball.carrier.y - player.y;
     if (Math.sqrt(dx * dx + dy * dy) < TACKLE_RANGE) {
       ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
-      tackleCooldown = 1.0; defenderFreeze = 0.6;
-      message = 'TACLE RÉUSSI !'; messageTimer = 0.8;
+            tackleCooldown = 1.0;
     }
   }
 }
@@ -224,20 +223,51 @@ function playerPass() {
   if (target) passBall(player, target, 340);
 }
 
+// ---- Tactile multi-doigts : chaque doigt est suivi par son identifiant ----
+let joyTouchId = null;
+const btnTouches = {}; // identifiant du doigt -> 'shoot' | 'sprint'
+
+function getTouchPos(t) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (t.clientX - rect.left) * (W / rect.width),
+    y: (t.clientY - rect.top) * (H / rect.height)
+  };
+}
+
 canvas.addEventListener('touchstart', e => {
-  const p = getPointerPos(e);
-  if (inCircle(p, shootBtn))  { startCharge(); e.preventDefault(); return; }
-  if (inCircle(p, tackleBtn)) { playerTackle(); e.preventDefault(); return; }
-  if (inCircle(p, passBtn))   { playerPass(); e.preventDefault(); return; }
-  if (inCircle(p, sprintBtn)) { sprinting = true; e.preventDefault(); return; }
-  if (inJoyZone(p)) { startJoy(p); e.preventDefault(); }
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const p = getTouchPos(t);
+    if (inCircle(p, shootBtn))       { startCharge(); btnTouches[t.identifier] = 'shoot'; }
+    else if (inCircle(p, tackleBtn)) { playerTackle(); }
+    else if (inCircle(p, passBtn))   { playerPass(); }
+    else if (inCircle(p, sprintBtn)) { sprinting = true; btnTouches[t.identifier] = 'sprint'; }
+    else if (inJoyZone(p) && joyTouchId === null) { joyTouchId = t.identifier; startJoy(p); }
+  }
 }, { passive: false });
 
 canvas.addEventListener('touchmove', e => {
-  if (joyActive) { moveJoy(getPointerPos(e)); e.preventDefault(); }
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === joyTouchId) moveJoy(getTouchPos(t));
+  }
 }, { passive: false });
 
-canvas.addEventListener('touchend', e => { endJoy(); releaseCharge(); sprinting = false; }, { passive: false });
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const id = e.changedTouches[i].identifier;
+    if (id === joyTouchId) { joyTouchId = null; endJoy(); }
+    else if (btnTouches[id] === 'shoot') { releaseCharge(); }
+    else if (btnTouches[id] === 'sprint') { sprinting = false; }
+    delete btnTouches[id];
+  }
+}
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
 let mouseDown = false;
 canvas.addEventListener('mousedown', e => {
@@ -267,7 +297,17 @@ function checkGoal() {
 
 function placeAtAnchor(e) { e.x = e.anchorX; e.y = e.anchorY; e.attackTimer = 0; e.decided = false; }
 
+let runOn = 0; // le nouveau joueur contrôlé continue sa course un instant
+function setControlled(e) {
+  if (player === e) return;
+  charging = false; shootCharge = 0;
+  e.attackTimer = 0; e.decided = false;
+  player = e;
+  homeAI = homeField.filter(x => x !== e);
+}
+
 function resetAfterGoal() {
+  setControlled(p10);
   player.x = 200; player.y = H / 2; player.facingX = 1; player.facingY = 0;
   for (const t of homeAI) placeAtAnchor(t);
   for (const o of awayAI) placeAtAnchor(o);
@@ -373,9 +413,7 @@ function updateFieldAI(e, dt, isPresser, sideField, attackGoalX) {
       const pdist = Math.sqrt(pdx * pdx + pdy * pdy);
       if (pdist < e.r + ball.carrier.r + 6) {
         ball.carrier = e; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
-        tackleCooldown = 1.0;
-        message = e.side === 'away' ? 'TACLE ADVERSE !' : 'BALLE RÉCUPÉRÉE (' + e.label + ') !';
-        messageTimer = 1;
+                tackleCooldown = 1.0;
       }
     }
   }
@@ -398,6 +436,9 @@ let lastTime = performance.now();
 function update(dt) {
   if (matchOver) return;
 
+  // Le contrôle passe automatiquement au joueur de mon équipe qui a le ballon
+    if (ball.carrier && homeField.includes(ball.carrier) && ball.carrier !== player) { setControlled(ball.carrier); runOn = 0.4; }
+
   matchTime -= dt;
   if (matchTime <= 0) { matchTime = 0; matchOver = true; }
 
@@ -406,7 +447,9 @@ function update(dt) {
   if (keys['ArrowUp']) vy = -1; else if (keys['ArrowDown']) vy = 1;
   if (joyActive && (joyVecX !== 0 || joyVecY !== 0)) { vx = joyVecX; vy = joyVecY; }
 
-  const len = Math.sqrt(vx * vx + vy * vy);
+    let len = Math.sqrt(vx * vx + vy * vy);
+  if (len > 0) runOn = 0;
+  else if (runOn > 0) { runOn -= dt; vx = player.facingX; vy = player.facingY; len = 1; }
   if (len > 0) {
     vx /= len; vy /= len;
     player.facingX = vx; player.facingY = vy;
