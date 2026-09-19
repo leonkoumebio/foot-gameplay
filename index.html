@@ -641,9 +641,12 @@ renderer.shadowMap.enabled = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b6e8);
 
-const camera = new THREE.PerspectiveCamera(45, W / H, 1, 500);
-camera.position.set(0, 52, 48);
-camera.lookAt(0, 0, 2);
+const BASE_FOV = 50; // champ de vision (plus grand = plus « grand angle »)
+const CAM_H = 28, CAM_Z = 42; // hauteur et recul de la caméra
+let camX = 0;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, W / H, 1, 500);
+camera.position.set(camX, CAM_H, CAM_Z);
+camera.lookAt(camX, 0, 0);
 camera.updateMatrixWorld();
 
 function resize3D() {
@@ -654,8 +657,8 @@ function resize3D() {
 
   // Écran moins large que 5:3 : on élargit le champ de vision pour garder tout le terrain visible
   const base = 5 / 3;
-  camera.fov = camera.aspect >= base ? 45
-    : 2 * Math.atan(Math.tan(45 * Math.PI / 360) * base / camera.aspect) * 180 / Math.PI;
+    camera.fov = camera.aspect >= base ? BASE_FOV
+    : 2 * Math.atan(Math.tan(BASE_FOV * Math.PI / 360) * base / camera.aspect) * 180 / Math.PI;
   camera.updateProjectionMatrix();
 
   // Interface 2D : même hauteur logique (480), largeur selon l'écran, donc sans déformation
@@ -846,7 +849,15 @@ function toScreen(x, y, h) {
    return { x: (v.x + 1) / 2 * UI_W, y: (1 - v.y) / 2 * H };
 }
 
+let camPrevT = 0;
 function render3D(t) {
+  // La caméra glisse doucement vers le ballon (max 12 unités de chaque côté)
+  const dtc = Math.min(t - camPrevT, 0.05); camPrevT = t;
+  const camTarget = Math.max(-12, Math.min(12, wx(ball.x) * 0.5));
+  camX += (camTarget - camX) * Math.min(1, dtc * 4);
+  camera.position.x = camX;
+  camera.lookAt(camX, 0, 0);
+
   for (const e of allField) syncPlayerMesh(e, t);
   syncGK(homeGK, Math.PI / 2);
   syncGK(awayGK, -Math.PI / 2);
