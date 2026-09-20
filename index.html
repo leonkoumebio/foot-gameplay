@@ -131,7 +131,7 @@ const keys = {};
 window.addEventListener('keydown', e => {
   keys[e.key] = true;
   if (e.key === ' ') { e.preventDefault(); startCharge(); }
-  if (e.key === 't' || e.key === 'T') playerTackle();
+   if ((e.key === 't' || e.key === 'T') && !e.repeat) playerTackle();
     if (e.key === 'p' || e.key === 'P') startPass();
     if (e.key === 'Shift') sprinting = true;
   if ((e.key === 'c' || e.key === 'C') && !e.repeat) switchPlayer();
@@ -397,12 +397,12 @@ function resetAfterGoal() {
   tackleCooldown = 0; defenderFreeze = 0;
 }
 
-function updateGK(gk, lineX) {
+function updateGK(gk, lineX, dt) {
   const minY = H / 2 - GOAL_HALF_HEIGHT + gk.r;
   const maxY = H / 2 + GOAL_HALF_HEIGHT - gk.r;
   const targetY = Math.max(minY, Math.min(maxY, ball.y));
-  if (gk.y < targetY) gk.y = Math.min(gk.y + gk.speed * (1/60), targetY);
-  else if (gk.y > targetY) gk.y = Math.max(gk.y - gk.speed * (1/60), targetY);
+    if (gk.y < targetY) gk.y = Math.min(gk.y + gk.speed * dt, targetY);
+  else if (gk.y > targetY) gk.y = Math.max(gk.y - gk.speed * dt, targetY);
 
   if (!ball.carrier) {
     const dx = ball.x - gk.x, dy = ball.y - gk.y;
@@ -556,13 +556,13 @@ function update(dt) {
     const c = ball.carrier;
     const targetBallX = c.x + c.facingX * DRIBBLE_OFFSET;
     const targetBallY = c.y + c.facingY * DRIBBLE_OFFSET;
-    ball.x += (targetBallX - ball.x) * 0.25;
-    ball.y += (targetBallY - ball.y) * 0.25;
+        ball.x += (targetBallX - ball.x) * (1 - Math.pow(0.75, dt * 60));
+        ball.y += (targetBallY - ball.y) * (1 - Math.pow(0.75, dt * 60));
   } else {
     ball.x += ball.vx * dt;
     ball.y += ball.vy * dt;
-    ball.vx *= BALL_FRICTION;
-    ball.vy *= BALL_FRICTION;
+        ball.vx *= Math.pow(BALL_FRICTION, dt * 60);
+        ball.vy *= Math.pow(BALL_FRICTION, dt * 60);
 
     if (ball.y < 24) { ball.y = 24; ball.vy *= -0.6; }
     if (ball.y > H - 24) { ball.y = H - 24; ball.vy *= -0.6; }
@@ -584,8 +584,8 @@ function update(dt) {
   const awayPresser = closestToBall(awayAI);
   for (const o of awayAI) updateFieldAI(o, dt, o === awayPresser, awayField, HOME_GOAL_X);
 
-  updateGK(homeGK, HOME_GOAL_X);
-  updateGK(awayGK, AWAY_GOAL_X);
+    updateGK(homeGK, HOME_GOAL_X, dt);
+    updateGK(awayGK, AWAY_GOAL_X, dt);
 
   if (tackleCooldown > 0) tackleCooldown -= dt;
   if (defenderFreeze > 0) defenderFreeze -= dt;
@@ -1433,5 +1433,6 @@ ball.x = player.x + DRIBBLE_OFFSET; ball.y = player.y;
 
 requestAnimationFrame(loop);
 </script>
+<script src="decor.js"></script>
 </body>
 </html>
