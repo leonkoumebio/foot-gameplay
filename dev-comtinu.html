@@ -1,0 +1,1438 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Foot Street — 3v3</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0d0d0d;
+    overflow: hidden;
+    height: 100%;
+    font-family: -apple-system, sans-serif;
+    touch-action: none;
+  }
+  #wrap {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+        height: 100vh;
+    height: 100dvh;
+  }
+        #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+  }
+  #stage canvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+  #view3d { pointer-events: none; }
+    #info {
+    position: fixed;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #eee;
+    font-size: 12px;
+    opacity: 0.7;
+    z-index: 10;
+    text-align: center;
+    pointer-events: none;
+    text-shadow: 0 1px 3px #000;
+    transition: opacity 1s;
+    width: max-content;
+    max-width: 90vw;
+  }
+  #info.hide { opacity: 0; }
+  @media (pointer: coarse) { #info { display: none; } }
+</style>
+</head>
+<body>
+<div id="info">3v3 — Joystick/flèches: bouger • ESPACE/TIR: tir chargé • T/TACLE: récupérer • Shift/SPRINT: accélérer • P/PASSE: passer</div>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="view3d"></canvas>
+    <canvas id="game" width="800" height="480"></canvas>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ===== Canvas 2D = interface (HUD, boutons) • Three.js = scène 3D =====
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+const PLAYER_BASE_SPEED = 140;
+const PLAYER_SPRINT_SPEED = 240;
+const DRIBBLE_OFFSET = 26;
+const MIN_SHOOT_SPEED = 380;
+const MAX_SHOOT_SPEED = 780;
+const CHARGE_TIME = 0.7;
+const BALL_FRICTION = 0.985;
+const PICKUP_DIST = 30;
+const PICKUP_MAX_SPEED = 40;
+const GOAL_HALF_HEIGHT = 45;
+const TACKLE_RANGE = 45;
+const HOME_GOAL_X = 20;
+const AWAY_GOAL_X = W - 20;
+
+// ---- Joueur contrôlé ----
+const p10 = { x: 200, y: H / 2, r: 14, facingX: 1, facingY: 0, side: 'home', label: '10', color: '#f5c518', speed: 150, attackTimer: 0, anchorX: 350, anchorY: H / 2 - 100 };
+let player = p10; // joueur actuellement contrôlé
+
+// ---- Coéquipiers IA (anchorX/Y = où ils reviennent quand ils ne pressent/dribblent pas) ----
+const teammate1 = { x: 0, y: 0, r: 14, facingX: 1, facingY: 0, side: 'home', label: '7',  color: '#ffe082', speed: 150, attackTimer: 0, anchorX: W - 220, anchorY: H / 2 };
+const teammate2 = { x: 0, y: 0, r: 14, facingX: 1, facingY: 0, side: 'home', label: '11', color: '#ffe082', speed: 130, attackTimer: 0, anchorX: 260,     anchorY: H / 2 + 120 };
+
+// ---- Adversaires IA ----
+const opp1 = { x: 0, y: 0, r: 14, facingX: -1, facingY: 0, side: 'away', label: '4', color: '#e53935', speed: 150, attackTimer: 0, anchorX: 520, anchorY: H / 2 - 70 };
+const opp2 = { x: 0, y: 0, r: 14, facingX: -1, facingY: 0, side: 'away', label: '9', color: '#e53935', speed: 140, attackTimer: 0, anchorX: 600, anchorY: H / 2 + 70 };
+const opp3 = { x: 0, y: 0, r: 14, facingX: -1, facingY: 0, side: 'away', label: '6', color: '#e53935', speed: 135, attackTimer: 0, anchorX: 560, anchorY: H / 2 };
+
+const homeGK = { x: 34,     y: H / 2, r: 13, speed: 160 };
+const awayGK = { x: W - 34, y: H / 2, r: 13, speed: 160 };
+
+const homeField = [p10, teammate1, teammate2];
+const awayField = [opp1, opp2, opp3];
+let homeAI = [teammate1, teammate2]; // équipiers gérés par l'IA (change selon qui est contrôlé)
+const awayAI = [opp1, opp2, opp3];
+
+const ball = { x: 0, y: 0, r: 8, vx: 0, vy: 0, carrier: player, passTarget: null };
+
+let scoreHome = 0;
+let scoreAway = 0;
+let matchTime = 90;
+let matchOver = false;
+let message = '';
+let messageTimer = 0;
+let charging = false;
+let shootCharge = 0;
+let tackleCooldown = 0;
+let defenderFreeze = 0;
+let sprinting = false;
+let passCharging = false;
+let passCharge = 0;
+const PASS_MIN_SPEED = 300, PASS_MAX_SPEED = 600, PASS_CHARGE_TIME = 0.6;
+
+// ---- Contrôles clavier ----
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === ' ') { e.preventDefault(); startCharge(); }
+   if ((e.key === 't' || e.key === 'T') && !e.repeat) playerTackle();
+    if (e.key === 'p' || e.key === 'P') startPass();
+    if (e.key === 'Shift') sprinting = true;
+  if ((e.key === 'c' || e.key === 'C') && !e.repeat) switchPlayer();
+});
+window.addEventListener('keyup', e => {
+  keys[e.key] = false;
+    if (e.key === ' ') releaseCharge();
+  if (e.key === 'p' || e.key === 'P') releasePass();
+  if (e.key === 'Shift') sprinting = false;
+});
+
+// ---- Joystick tactile ----
+let joyActive = false;
+let joyBaseX = 90, joyBaseY = H - 90;
+let joyThumbX = joyBaseX, joyThumbY = joyBaseY;
+let joyVecX = 0, joyVecY = 0;
+const JOY_RADIUS = 50;
+const JOY_ZONE_W = 220, JOY_ZONE_H = 180;
+
+// ---- Boutons (taille unique) ----
+let UI_W = W; // largeur réelle de l'interface (s'adapte à l'écran)
+const BTN_R = 32;
+const shootBtn  = { x: 0, y: H - 46,  r: BTN_R };
+const tackleBtn = { x: 0, y: H - 46,  r: BTN_R };
+const passBtn   = { x: 0, y: H - 112, r: BTN_R };
+const sprintBtn = { x: 0, y: H - 112, r: BTN_R };
+const switchBtn = { x: 0, y: H - 112, r: BTN_R };
+function layoutButtons() {
+  shootBtn.x  = UI_W - 50;
+  tackleBtn.x = UI_W - 126;
+  sprintBtn.x = UI_W - 50;
+  passBtn.x   = UI_W - 126;
+  switchBtn.x = UI_W - 202;
+}
+
+function getPointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const touch = e.touches ? e.touches[0] : e;
+  return {
+    x: (touch.clientX - rect.left) * (canvas.width / rect.width),
+    y: (touch.clientY - rect.top) * (H / rect.height)
+  };
+}
+
+function inJoyZone(p) { return p.x >= 0 && p.x <= JOY_ZONE_W && p.y >= H - JOY_ZONE_H && p.y <= H; }
+function inCircle(p, c) { const dx = p.x - c.x, dy = p.y - c.y; return Math.sqrt(dx * dx + dy * dy) <= c.r; }
+
+function startJoy(p) { joyActive = true; joyBaseX = p.x; joyBaseY = p.y; joyThumbX = p.x; joyThumbY = p.y; }
+function moveJoy(p) {
+  const dx = p.x - joyBaseX, dy = p.y - joyBaseY;
+  const dist = Math.min(Math.sqrt(dx * dx + dy * dy), JOY_RADIUS);
+  const angle = Math.atan2(dy, dx);
+  joyThumbX = joyBaseX + Math.cos(angle) * dist;
+  joyThumbY = joyBaseY + Math.sin(angle) * dist;
+  joyVecX = Math.cos(angle) * (dist / JOY_RADIUS);
+  joyVecY = Math.sin(angle) * (dist / JOY_RADIUS);
+}
+function endJoy() { joyActive = false; joyVecX = 0; joyVecY = 0; joyThumbX = joyBaseX; joyThumbY = joyBaseY; }
+
+function startCharge() { if (ball.carrier === player) charging = true; }
+function releaseCharge() {
+  if (!charging) return;
+  charging = false;
+  if (ball.carrier !== player) { shootCharge = 0; return; }
+  const power = MIN_SHOOT_SPEED + (MAX_SHOOT_SPEED - MIN_SHOOT_SPEED) * Math.sqrt(shootCharge);
+  ball.carrier = null;
+  ball.vx = player.facingX * power;
+    ball.vy = player.facingY * power;
+  triggerKick(player, Math.sqrt(shootCharge), true);
+  shootCharge = 0;
+}
+
+const SLIDE_DUR = 0.45; // durée de la glissade (secondes)
+
+// Prend le ballon s'il est à portée (au sol ou chez un adversaire)
+function tackleContact() {
+  if (ball.carrier === player) return false;
+  const src = ball.carrier ? (ball.carrier.side === 'away' ? ball.carrier : null) : ball;
+  if (!src) return false;
+    if (Math.hypot(src.x - player.x, src.y - player.y) >= TACKLE_RANGE) return false;
+  if (src !== ball) src.fallT = FALL_DUR; // le porteur adverse tombe
+  ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+  tackleCooldown = 1.0;
+  return true;
+}
+
+function playerTackle() {
+  if (ball.carrier === player) return;
+  if (player.slideT > 0 || performance.now() < (player.slideReady || 0)) return;
+  player.slideT = SLIDE_DUR;
+  player.slideReady = performance.now() + 900; // pas de glissade en boucle
+  player.slideDx = player.facingX; player.slideDy = player.facingY;
+  tackleContact();
+}
+
+// Ancienne version : plus utilisée, à supprimer plus tard
+function playerTackleOld() {
+  if (ball.carrier === player) return;
+  if (!ball.carrier) {
+    const dx = ball.x - player.x, dy = ball.y - player.y;
+    if (Math.sqrt(dx * dx + dy * dy) < TACKLE_RANGE) {
+      ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+            tackleCooldown = 1.0;
+    }
+    return;
+  }
+  if (ball.carrier.side === 'away') {
+    const dx = ball.carrier.x - player.x, dy = ball.carrier.y - player.y;
+    if (Math.sqrt(dx * dx + dy * dy) < TACKLE_RANGE) {
+      ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+            tackleCooldown = 1.0;
+    }
+  }
+}
+
+function nearestTeammate(from, arr) {
+  let best = null, bestDist = Infinity;
+  for (const t of arr) {
+    if (t === from) continue;
+    const d = Math.hypot(t.x - from.x, t.y - from.y);
+    if (d < bestDist) { bestDist = d; best = t; }
+  }
+  return best;
+}
+
+function passBall(from, to, speed) {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  ball.carrier = null;
+  ball.passTarget = to;
+  ball.vx = (dx / dist) * speed;
+    ball.vy = (dy / dist) * speed;
+  triggerKick(from, 0.25, true);
+}
+
+function startPass() { if (ball.carrier === player) passCharging = true; }
+function releasePass() {
+  if (!passCharging) return;
+  passCharging = false;
+  const speed = PASS_MIN_SPEED + (PASS_MAX_SPEED - PASS_MIN_SPEED) * Math.sqrt(passCharge);
+  passCharge = 0;
+  playerPass(speed);
+}
+function playerPass(speed = 340) {
+  if (ball.carrier !== player) return;
+  const target = nearestTeammate(player, homeField);
+    if (target) passBall(player, target, speed);
+}
+
+// ---- Tactile multi-doigts : chaque doigt est suivi par son identifiant ----
+let joyTouchId = null;
+const btnTouches = {}; // identifiant du doigt -> 'shoot' | 'sprint'
+
+function getTouchPos(t) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (t.clientX - rect.left) * (canvas.width / rect.width),
+    y: (t.clientY - rect.top) * (H / rect.height)
+  };
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const p = getTouchPos(t);
+    if (inCircle(p, shootBtn))       { startCharge(); btnTouches[t.identifier] = 'shoot'; }
+    else if (inCircle(p, tackleBtn)) { playerTackle(); }
+    else if (inCircle(p, passBtn))   { startPass(); btnTouches[t.identifier] = 'pass'; }
+    else if (inCircle(p, sprintBtn)) { sprinting = true; btnTouches[t.identifier] = 'sprint'; }
+    else if (switchVisible() && inCircle(p, switchBtn)) { switchPlayer(); }
+    else if (inJoyZone(p) && joyTouchId === null) { joyTouchId = t.identifier; startJoy(p); }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === joyTouchId) moveJoy(getTouchPos(t));
+  }
+}, { passive: false });
+
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const id = e.changedTouches[i].identifier;
+    if (id === joyTouchId) { joyTouchId = null; endJoy(); }
+    else if (btnTouches[id] === 'shoot') { releaseCharge(); }
+        else if (btnTouches[id] === 'pass') { releasePass(); }
+    else if (btnTouches[id] === 'sprint') { sprinting = false; }
+    delete btnTouches[id];
+  }
+}
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+let mouseDown = false;
+canvas.addEventListener('mousedown', e => {
+  const p = getPointerPos(e);
+  if (inCircle(p, shootBtn))  { startCharge(); return; }
+  if (inCircle(p, tackleBtn)) { playerTackle(); return; }
+  if (inCircle(p, passBtn))   { startPass(); return; }
+  if (inCircle(p, sprintBtn)) { sprinting = true; return; }
+    if (switchVisible() && inCircle(p, switchBtn)) { switchPlayer(); return; }
+  if (inJoyZone(p)) { startJoy(p); mouseDown = true; }
+});
+canvas.addEventListener('mousemove', e => { if (mouseDown && joyActive) moveJoy(getPointerPos(e)); });
+window.addEventListener('mouseup', () => { mouseDown = false; endJoy(); releaseCharge(); releasePass(); sprinting = false; });
+
+// ---- Buts ----
+function checkGoal() {
+  const inGoalY = ball.y > H / 2 - GOAL_HALF_HEIGHT && ball.y < H / 2 + GOAL_HALF_HEIGHT;
+  if (inGoalY && ball.x >= W - 18) {
+        scoreHome++;
+    message = 'BUT !'; messageTimer = 1.5;
+    awayNetShake = 0.6;
+    resetAfterGoal();
+  } else if (inGoalY && ball.x <= 18) {
+    scoreAway++;
+    message = 'BUT ADVERSE'; messageTimer = 1.5;
+    homeNetShake = 0.6;
+    resetAfterGoal();
+  }
+}
+
+function placeAtAnchor(e) { e.x = e.anchorX; e.y = e.anchorY; e.attackTimer = 0; e.decided = false; e.fallT = 0; }
+
+let runOn = 0; // le nouveau joueur contrôlé continue sa course un instant
+function setControlled(e) {
+  if (player === e) return;
+    charging = false; shootCharge = 0; passCharging = false; passCharge = 0;
+  e.attackTimer = 0; e.decided = false;
+  player = e;
+  homeAI = homeField.filter(x => x !== e);
+}
+
+// Le bouton n'existe que lorsque l'adversaire a le ballon
+function switchVisible() {
+  return !matchOver && !!ball.carrier && ball.carrier.side === 'away';
+}
+
+// Donne le contrôle au joueur de mon équipe le plus proche du ballon (hors joueur actuel)
+function switchPlayer() {
+  if (!switchVisible()) return;
+  let best = null, bestD = Infinity;
+  for (const p of homeField) {
+    if (p === player) continue;
+    const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (best) { setControlled(best); runOn = 0; }
+}
+
+function resetAfterGoal() {
+  setControlled(p10);
+  player.x = 200; player.y = H / 2; player.facingX = 1; player.facingY = 0;
+  for (const t of homeAI) placeAtAnchor(t);
+  for (const o of awayAI) placeAtAnchor(o);
+  homeGK.y = H / 2; awayGK.y = H / 2;
+  ball.carrier = player; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+  ball.x = player.x + DRIBBLE_OFFSET; ball.y = player.y;
+  tackleCooldown = 0; defenderFreeze = 0;
+}
+
+function updateGK(gk, lineX, dt) {
+  const minY = H / 2 - GOAL_HALF_HEIGHT + gk.r;
+  const maxY = H / 2 + GOAL_HALF_HEIGHT - gk.r;
+  const targetY = Math.max(minY, Math.min(maxY, ball.y));
+    if (gk.y < targetY) gk.y = Math.min(gk.y + gk.speed * dt, targetY);
+  else if (gk.y > targetY) gk.y = Math.max(gk.y - gk.speed * dt, targetY);
+
+  if (!ball.carrier) {
+    const dx = ball.x - gk.x, dy = ball.y - gk.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < gk.r + ball.r) {
+      const angle = Math.atan2(dy, dx);
+      const pushSpeed = 260;
+      const dir = lineX < W / 2 ? 1 : -1;
+      ball.vy = Math.sin(angle) * pushSpeed;
+      ball.vx = dir * Math.abs(Math.cos(angle) * pushSpeed) + dir * 80;
+      ball.passTarget = null;
+      message = 'ARRÊTÉ !'; messageTimer = 1;
+    }
+  }
+}
+
+function checkPassCatch() {
+  if (ball.carrier || !ball.passTarget) return;
+  const t = ball.passTarget;
+  const dx = ball.x - t.x, dy = ball.y - t.y;
+  if (Math.sqrt(dx * dx + dy * dy) < PICKUP_DIST + 8) {
+    ball.carrier = t; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+  }
+}
+
+function tryPickup() {
+  if (ball.carrier) return;
+  const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+  if (speed >= PICKUP_MAX_SPEED) return;
+    for (const c of [player, ...homeAI, ...awayAI]) {
+    if (c.fallT > 0) continue; // un joueur à terre ne ramasse pas le ballon
+    const dx = ball.x - c.x, dy = ball.y - c.y;
+    if (Math.sqrt(dx * dx + dy * dy) < PICKUP_DIST) {
+      ball.carrier = c; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+      return;
+    }
+  }
+}
+
+// ---- IA générique (sert aussi bien aux coéquipiers qu'aux adversaires) ----
+function updateFieldAI(e, dt, isPresser, sideField, attackGoalX) {
+  if (e.fallT > 0) { e.fallT -= dt; return; } // à terre : ne bouge plus
+  if (ball.carrier === e) {
+    if (!e.decided) { e.decided = true; e.willPass = Math.random() < 0.45; }
+    const targetX = attackGoalX, targetY = H / 2;
+    const dx = targetX - e.x, dy = targetY - e.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 4) {
+      e.facingX = dx / dist; e.facingY = dy / dist;
+      e.x += e.facingX * e.speed * dt;
+      e.y += e.facingY * e.speed * dt;
+    }
+    e.attackTimer += dt;
+    if (e.willPass && e.attackTimer > 0.9 && e.attackTimer < 1.15) {
+      const mate = nearestTeammate(e, sideField);
+      if (mate) passBall(e, mate, 400);
+      e.attackTimer = 0; e.decided = false;
+    } else if (dist < 180 || e.attackTimer > 2.6) {
+      const gy = H / 2 + (Math.random() - 0.5) * 50;
+      const sdx = targetX - e.x, sdy = gy - e.y;
+      const sdist = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
+      ball.carrier = null; ball.passTarget = null;
+      ball.vx = (sdx / sdist) * 480;
+            ball.vy = (sdy / sdist) * 480;
+      triggerKick(e, 0.7, true);
+      e.attackTimer = 0; e.decided = false;
+    }
+  } else {
+    e.attackTimer = 0; e.decided = false;
+    if (defenderFreeze > 0) return;
+
+    const ownTeamHasBall = ball.carrier && ball.carrier.side === e.side;
+    let tx, ty;
+    if (ownTeamHasBall) {
+      tx = e.anchorX; ty = e.anchorY;
+    } else if (isPresser) {
+      tx = ball.x; ty = ball.y;
+    } else {
+      tx = e.anchorX; ty = e.anchorY;
+    }
+    const dx = tx - e.x, dy = ty - e.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 4) {
+      e.facingX = dx / dist; e.facingY = dy / dist;
+      e.x += e.facingX * e.speed * dt;
+      e.y += e.facingY * e.speed * dt;
+    }
+
+    if (!ownTeamHasBall && isPresser && ball.carrier && ball.carrier.side !== e.side && tackleCooldown <= 0) {
+      const pdx = ball.carrier.x - e.x, pdy = ball.carrier.y - e.y;
+      const pdist = Math.sqrt(pdx * pdx + pdy * pdy);
+            if (pdist < e.r + ball.carrier.r + 6) {
+        triggerKick(e, 0.45, false);
+        ball.carrier = e; ball.vx = 0; ball.vy = 0; ball.passTarget = null;
+                tackleCooldown = 1.0;
+      }
+    }
+  }
+  e.x = Math.max(34, Math.min(W - 34, e.x));
+  e.y = Math.max(34, Math.min(H - 34, e.y));
+}
+
+function closestToBall(arr) {
+  let best = arr[0], bestDist = Infinity;
+  for (const e of arr) {
+    const d = Math.hypot(ball.x - e.x, ball.y - e.y);
+    if (d < bestDist) { bestDist = d; best = e; }
+  }
+  return best;
+}
+
+// ---- Boucle de jeu ----
+let lastTime = performance.now();
+
+function update(dt) {
+  if (matchOver) return;
+
+  // Le contrôle passe automatiquement au joueur de mon équipe qui a le ballon
+    if (ball.carrier && homeField.includes(ball.carrier) && ball.carrier !== player) { setControlled(ball.carrier); runOn = 0.4; }
+
+  matchTime -= dt;
+  if (matchTime <= 0) { matchTime = 0; matchOver = true; }
+
+  let vx = 0, vy = 0;
+  if (keys['ArrowLeft']) vx = -1; else if (keys['ArrowRight']) vx = 1;
+  if (keys['ArrowUp']) vy = -1; else if (keys['ArrowDown']) vy = 1;
+  if (joyActive && (joyVecX !== 0 || joyVecY !== 0)) { vx = joyVecX; vy = joyVecY; }
+
+    let len = Math.sqrt(vx * vx + vy * vy);
+  if (len > 0) runOn = 0;
+    else if (runOn > 0) { runOn -= dt; vx = player.facingX; vy = player.facingY; len = 1; }
+  // Glissade : trajectoire verrouillée, vitesse qui diminue, prise du ballon au contact
+  let slideSpeed = 0;
+  if (player.slideT > 0) {
+    player.slideT -= dt;
+    vx = player.slideDx; vy = player.slideDy; len = 1;
+    slideSpeed = 40 + 220 * Math.max(0, player.slideT) / SLIDE_DUR;
+    tackleContact();
+  }
+  if (len > 0) {
+    vx /= len; vy /= len;
+    player.facingX = vx; player.facingY = vy;
+    const currentSpeed = slideSpeed || (sprinting ? PLAYER_SPRINT_SPEED : PLAYER_BASE_SPEED);
+    player.x += vx * currentSpeed * dt;
+    player.y += vy * currentSpeed * dt;
+    player.x = Math.max(34, Math.min(W - 34, player.x));
+    player.y = Math.max(34, Math.min(H - 34, player.y));
+  }
+
+  if (ball.carrier) {
+    const c = ball.carrier;
+    const targetBallX = c.x + c.facingX * DRIBBLE_OFFSET;
+    const targetBallY = c.y + c.facingY * DRIBBLE_OFFSET;
+        ball.x += (targetBallX - ball.x) * (1 - Math.pow(0.75, dt * 60));
+        ball.y += (targetBallY - ball.y) * (1 - Math.pow(0.75, dt * 60));
+  } else {
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+        ball.vx *= Math.pow(BALL_FRICTION, dt * 60);
+        ball.vy *= Math.pow(BALL_FRICTION, dt * 60);
+
+    if (ball.y < 24) { ball.y = 24; ball.vy *= -0.6; }
+    if (ball.y > H - 24) { ball.y = H - 24; ball.vy *= -0.6; }
+
+    const inGoalY = ball.y > H / 2 - GOAL_HALF_HEIGHT && ball.y < H / 2 + GOAL_HALF_HEIGHT;
+    if (!inGoalY) {
+      if (ball.x < 24) { ball.x = 24; ball.vx *= -0.6; }
+      if (ball.x > W - 24) { ball.x = W - 24; ball.vx *= -0.6; }
+    }
+
+    checkGoal();
+    checkPassCatch();
+    tryPickup();
+  }
+
+  const homePresser = closestToBall(homeAI);
+  for (const t of homeAI) updateFieldAI(t, dt, t === homePresser, homeField, AWAY_GOAL_X);
+
+  const awayPresser = closestToBall(awayAI);
+  for (const o of awayAI) updateFieldAI(o, dt, o === awayPresser, awayField, HOME_GOAL_X);
+
+    updateGK(homeGK, HOME_GOAL_X, dt);
+    updateGK(awayGK, AWAY_GOAL_X, dt);
+
+  if (tackleCooldown > 0) tackleCooldown -= dt;
+  if (defenderFreeze > 0) defenderFreeze -= dt;
+    if (charging) shootCharge = Math.min(shootCharge + dt / CHARGE_TIME, 1);
+  if (passCharging && ball.carrier !== player) { passCharging = false; passCharge = 0; } // ballon perdu
+  if (passCharging) passCharge = Math.min(passCharge + dt / PASS_CHARGE_TIME, 1);
+  if (messageTimer > 0) messageTimer -= dt;
+}
+
+function drawCourt() {
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(20, 20, W - 40, H - 40);
+  ctx.beginPath(); ctx.arc(W / 2, H / 2, 60, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W / 2, 20); ctx.lineTo(W / 2, H - 20); ctx.stroke();
+  drawGoalCage(H / 2 - GOAL_HALF_HEIGHT, H / 2 + GOAL_HALF_HEIGHT, 20, -1);
+  drawGoalCage(H / 2 - GOAL_HALF_HEIGHT, H / 2 + GOAL_HALF_HEIGHT, W - 20, 1);
+}
+
+function drawGoalCage(yStart, yEnd, lineX, dir) {
+  const depth = 22;
+  const backX = lineX + dir * depth;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+  for (let y = yStart; y <= yEnd; y += 9) { ctx.beginPath(); ctx.moveTo(lineX, y); ctx.lineTo(backX, y); ctx.stroke(); }
+  for (let d = 0; d <= depth; d += 8) { const x = lineX + dir * d; ctx.beginPath(); ctx.moveTo(x, yStart); ctx.lineTo(x, yEnd); ctx.stroke(); }
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(lineX, yStart); ctx.lineTo(backX, yStart);
+  ctx.moveTo(lineX, yEnd); ctx.lineTo(backX, yEnd);
+  ctx.moveTo(backX, yStart); ctx.lineTo(backX, yEnd);
+  ctx.stroke();
+}
+
+function drawGK(gk) {
+  ctx.beginPath(); ctx.arc(gk.x, gk.y, gk.r, 0, Math.PI * 2);
+  ctx.fillStyle = '#42a5f5'; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+function drawEntity(e) {
+  ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+  ctx.fillStyle = e.color; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = e.side === 'home' ? '#000' : '#fff';
+  ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(e.label, e.x, e.y);
+
+  if (e === player) {
+    const tipX = e.x + e.facingX * 22, tipY = e.y + e.facingY * 22;
+    ctx.strokeStyle = e.color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(e.x, e.y); ctx.lineTo(tipX, tipY); ctx.stroke();
+  }
+}
+
+function drawBall() {
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+function drawPassBar() {
+  if (!passCharging || charging) return;
+  const barW = 60, barH = 8;
+  const sp = toScreen(player.x, player.y, 4.8);
+  const x = sp.x - barW / 2, y = sp.y;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x, y, barW, barH);
+  ctx.fillStyle = passCharge > 0.7 ? '#29b6f6' : (passCharge > 0.35 ? '#26c6da' : '#66bb6a');
+  ctx.fillRect(x, y, barW * passCharge, barH);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(x, y, barW, barH);
+}
+
+function drawPowerBar() {
+  if (!charging) return;
+  const barW = 60, barH = 8;
+    const sp = toScreen(player.x, player.y, 4.8);
+  const x = sp.x - barW / 2, y = sp.y;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x, y, barW, barH);
+  ctx.fillStyle = shootCharge > 0.7 ? '#e53935' : (shootCharge > 0.35 ? '#fb8c00' : '#4caf50');
+  ctx.fillRect(x, y, barW * shootCharge, barH);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(x, y, barW, barH);
+}
+
+function drawJoystick() {
+  ctx.beginPath(); ctx.arc(joyBaseX, joyBaseY, JOY_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(joyThumbX, joyThumbY, JOY_RADIUS / 2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fill();
+}
+
+const BTN_OFF = ['#6b6b6b', '#3a3a3a'];
+function drawBtn(btn, colors, label, active) {
+  const [top, bottom] = active ? colors : BTN_OFF;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 7;
+  ctx.shadowOffsetY = 3;
+  const grad = ctx.createLinearGradient(btn.x, btn.y - btn.r, btn.x, btn.y + btn.r);
+  grad.addColorStop(0, top);
+  grad.addColorStop(1, bottom);
+  ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.r, 0, Math.PI * 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+
+  ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.r, 0, Math.PI * 2);
+  ctx.lineWidth = active ? 2.5 : 1.5;
+  ctx.strokeStyle = active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.25)';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(btn.x - btn.r * 0.32, btn.y - btn.r * 0.45, btn.r * 0.55, btn.r * 0.28, -0.4, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.fill();
+
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.strokeText(label, btn.x, btn.y);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(label, btn.x, btn.y);
+}
+
+function drawButtons() {
+  if (switchVisible()) drawBtn(switchBtn, ['#ffb74d', '#e65100'], 'CHANGE', true);
+  drawBtn(shootBtn,  ['#ff5f52', '#c62828'], 'TIR',   ball.carrier === player);
+  drawBtn(tackleBtn, ['#64b5f6', '#1565c0'], 'TACLE', ball.carrier !== player);
+  drawBtn(sprintBtn, ['#ffd54f', '#ff8f00'], 'SPRINT', sprinting);
+  drawBtn(passBtn,   ['#81c784', '#2e7d32'], 'PASSE', ball.carrier === player);
+}
+
+function hudPill(x, y, w, h, fill) {
+  const r = h / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function drawHUD() {
+  const W = UI_W; // le score reste centré sur l'écran réel
+  const totalSec = Math.ceil(matchTime);
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+  const ss = String(totalSec % 60).padStart(2, '0');
+
+  // Bandeau : [ VOUS  0 - 0  ADV ]  [ 01:30 ]
+  const top = 10, bh = 34, sw = 230, tw = 74, gap = 8;
+  const x0 = W / 2 - (sw + gap + tw) / 2;
+  hudPill(x0, top, sw, bh, 'rgba(0,0,0,0.7)');
+  hudPill(x0 + sw + gap, top, tw, bh, 'rgba(0,0,0,0.7)');
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const cy = top + bh / 2 + 1;
+  ctx.font = 'bold 14px sans-serif';
+  ctx.fillStyle = '#f5c518'; ctx.fillText('VOUS', x0 + 42, cy);
+  ctx.fillStyle = '#ff6b63'; ctx.fillText('ADV', x0 + sw - 42, cy);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.fillText(scoreHome + ' - ' + scoreAway, x0 + sw / 2, cy);
+  ctx.font = 'bold 16px sans-serif';
+  ctx.fillText(mm + ':' + ss, x0 + sw + gap + tw / 2, cy);
+
+  // Messages (BUT !, ARRÊTÉ !...) sous le bandeau, avec contour sombre
+  if (messageTimer > 0 && !matchOver) {
+    ctx.font = 'bold 26px sans-serif';
+    ctx.lineJoin = 'round'; ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+    ctx.strokeText(message, W / 2, top + bh + 26);
+    ctx.fillStyle = message === 'BUT !' ? '#4caf50' : (message === 'BUT ADVERSE' ? '#ff5252' : '#f0f0f0');
+    ctx.fillText(message, W / 2, top + bh + 26);
+  }
+  ctx.textBaseline = 'top'; // l'écran de fin de match juste en dessous attend ce réglage
+
+  if (matchOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.fillText('FIN DU MATCH', W / 2, H / 2 - 40);
+    ctx.font = 'bold 24px sans-serif';
+    const result = scoreHome > scoreAway ? 'VICTOIRE' : (scoreHome < scoreAway ? 'DÉFAITE' : 'ÉGALITÉ');
+    ctx.fillText(result + '  (' + scoreHome + ' - ' + scoreAway + ')', W / 2, H / 2);
+  }
+}
+
+// ================== SCÈNE 3D (Three.js) ==================
+const SCALE = 0.1; // 1 unité de jeu = 0.1 unité 3D
+const wx = x => (x - W / 2) * SCALE;
+const wz = y => (y - H / 2) * SCALE;
+
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('view3d'), antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = true;
+
+function makeSkyTexture() {
+  const c = document.createElement('canvas'); c.width = 2; c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, '#2f6fb0');
+  grad.addColorStop(0.55, '#7fb4e0');
+  grad.addColorStop(1, '#d9ecf7');
+  g.fillStyle = grad; g.fillRect(0, 0, 2, 256);
+  return new THREE.CanvasTexture(c);
+}
+const scene = new THREE.Scene();
+scene.background = makeSkyTexture();
+scene.fog = new THREE.Fog(0xbcd9ec, 55, 150);
+
+const BASE_FOV = 50; // champ de vision (plus grand = plus « grand angle »)
+const CAM_H = 28, CAM_Z = 42; // hauteur et recul de la caméra
+let camX = 0;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, W / H, 1, 500);
+camera.position.set(camX, CAM_H, CAM_Z);
+camera.lookAt(camX, 0, 0);
+camera.updateMatrixWorld();
+
+function resize3D() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+
+  // Écran moins large que 5:3 : on élargit le champ de vision pour garder tout le terrain visible
+  const base = 5 / 3;
+    camera.fov = camera.aspect >= base ? BASE_FOV
+    : 2 * Math.atan(Math.tan(BASE_FOV * Math.PI / 360) * base / camera.aspect) * 180 / Math.PI;
+  camera.updateProjectionMatrix();
+
+  // Interface 2D : même hauteur logique (480), largeur selon l'écran, donc sans déformation
+  canvas.width = Math.round(H * camera.aspect);
+  canvas.height = H;
+  UI_W = canvas.width;
+  layoutButtons();
+}
+window.addEventListener('resize', resize3D);
+resize3D();
+
+// ---- Lumières ----
+scene.add(new THREE.HemisphereLight(0xffffff, 0x666677, 0.8));
+const sun = new THREE.DirectionalLight(0xfff1cc, 0.8);
+sun.position.set(-30, 50, 25);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -50; sun.shadow.camera.right = 50;
+sun.shadow.camera.top = 45; sun.shadow.camera.bottom = -45;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 150;
+sun.shadow.camera.updateProjectionMatrix();
+scene.add(sun);
+
+// ---- Utilitaires ----
+const mat = (color, rough = 0.9) => new THREE.MeshStandardMaterial({ color, roughness: rough });
+function addBox(w, h, d, x, y, z, material, shadow = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  m.position.set(x, y, z);
+  m.castShadow = shadow; m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+function makeNetTexture() {
+  const size = 128;
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, size, size); // fond noir = transparent (la texture sert de masque)
+  g.strokeStyle = '#ffffff';
+  g.lineWidth = 4;
+  const step = 24;
+  for (let i = -size; i <= size * 2; i += step) {
+    g.beginPath(); g.moveTo(i, 0); g.lineTo(i + size, size); g.stroke();
+    g.beginPath(); g.moveTo(i, size); g.lineTo(i + size, 0); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.generateMipmaps = true;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+const gridTex = makeNetTexture();
+function netPlane(w, h, px, py, pz, rx, ry, cell = 0.5) {
+  const t = gridTex.clone(); t.needsUpdate = true; t.repeat.set(w / cell, h / cell);
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+       new THREE.MeshBasicMaterial({ color: 0xffffff, alphaMap: t, transparent: true, side: THREE.DoubleSide, depthWrite: false })
+  );
+  m.position.set(px, py, pz); m.rotation.set(rx, ry, 0);
+  return m;
+}
+
+// ---- Sol, terrain et lignes ----
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), mat(0x4a4a4f));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+
+const court = new THREE.Mesh(new THREE.PlaneGeometry(84, 50), mat(0x3a3a42));
+court.rotation.x = -Math.PI / 2; court.position.y = 0.02; court.receiveShadow = true; scene.add(court);
+
+const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+addBox(76.3, 0.02, 0.3, 0, 0.04, -22, lineMat, false);
+addBox(76.3, 0.02, 0.3, 0, 0.04, 22, lineMat, false);
+addBox(0.3, 0.02, 44.3, -38, 0.04, 0, lineMat, false);
+addBox(0.3, 0.02, 44.3, 38, 0.04, 0, lineMat, false);
+addBox(0.3, 0.02, 44, 0, 0.04, 0, lineMat, false);
+const ring = new THREE.Mesh(new THREE.RingGeometry(5.85, 6.15, 64), lineMat);
+ring.rotation.x = -Math.PI / 2; ring.position.y = 0.06; scene.add(ring);
+
+// ---- Murs et grillage ----
+const wallMat = mat(0x2a2a30);
+addBox(85.2, 5, 0.6, 0, 2.5, -25, wallMat);
+addBox(0.6, 5, 50.6, -42.3, 2.5, 0, wallMat);
+addBox(0.6, 5, 50.6, 42.3, 2.5, 0, wallMat);
+addBox(85.2, 0.8, 0.6, 0, 0.4, 25, wallMat);
+scene.add(netPlane(85.2, 4, 0, 7, -25, 0, 0, 1));
+
+// ---- Petits buts ----
+function buildGoal(dir) {
+  const g = new THREE.Group();
+  const gh = GOAL_HALF_HEIGHT * SCALE, GH = 3.4, D = 2.2;
+  const postMat = mat(0xffffff, 0.4);
+  for (const z of [-gh, gh]) {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, GH, 12), postMat);
+    p.position.set(0, GH / 2, z); p.castShadow = true; g.add(p);
+  }
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, gh * 2, 12), postMat);
+  bar.rotation.x = Math.PI / 2; bar.position.set(0, GH, 0); bar.castShadow = true; g.add(bar);
+  const backNet = netPlane(2 * gh, GH, dir * D, GH / 2, 0, 0, Math.PI / 2);
+  backNet.userData.restX = backNet.position.x;
+  g.add(backNet);
+  g.add(netPlane(D, 2 * gh, dir * D / 2, GH, 0, -Math.PI / 2, 0));
+  g.add(netPlane(D, GH, dir * D / 2, GH / 2, -gh, 0, 0));
+  g.add(netPlane(D, GH, dir * D / 2, GH / 2, gh, 0, 0));
+  g.position.set(dir * 38, 0, 0);
+  scene.add(g);
+  return backNet;
+}
+const homeNetBack = buildGoal(-1);
+const awayNetBack = buildGoal(1);
+let homeNetShake = 0, awayNetShake = 0;
+
+// ---- Immeubles en arrière-plan ----
+function buildingMat(color, w, h) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = color; g.fillRect(0, 0, 64, 64);
+  g.fillStyle = 'rgba(20,30,50,0.55)';
+  g.fillRect(10, 12, 16, 24); g.fillRect(38, 12, 16, 24);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(w / 8, h / 8);
+  return new THREE.MeshStandardMaterial({ map: t, roughness: 1 });
+}
+const palette = ['#e8743b', '#3b8ee8', '#f2c744', '#d9578a', '#5fbf8f'];
+for (let i = -10; i <= 10; i++) {
+  const w = 12, d = 12, h = 16 + (((i * 37) % 5) + 5) % 5 * 5;
+  const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), buildingMat(palette[(i + 10) % palette.length], w, h));
+  b.position.set(i * 13, h / 2, -45);
+  scene.add(b);
+}
+// Deuxième rangée, plus loin et plus haute, estompée par la brume (effet de profondeur)
+for (let i = -8; i <= 8; i++) {
+  const w = 14, d = 14, h = 26 + (((i * 53) % 6) + 6) % 6 * 6;
+  const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), buildingMat(palette[(i + 13) % palette.length], w, h));
+  b.position.set(i * 16 + 7, h / 2, -85);
+  scene.add(b);
+}
+
+// ---- Arbres stylisés autour du terrain ----
+function makeTree(x, z, scale) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22 * scale, 0.3 * scale, 2.6 * scale, 7), mat(0x6b4423, 0.9));
+  trunk.position.y = 1.3 * scale; trunk.castShadow = true; g.add(trunk);
+  const leafColors = [0x4c9a4c, 0x3f8f4f, 0x5aa85a];
+  for (let i = 0; i < 3; i++) {
+    const s = (1.5 - i * 0.32) * scale;
+    const leaf = new THREE.Mesh(new THREE.ConeGeometry(s, s * 1.4, 8), mat(leafColors[i % leafColors.length], 0.95));
+    leaf.position.y = 2.6 * scale + i * 1.05 * scale;
+    leaf.castShadow = true; g.add(leaf);
+  }
+  g.position.set(x, 0, z);
+  scene.add(g);
+}
+for (let z = -20; z <= 20; z += 9) {
+  makeTree(-47, z, 0.9 + (Math.abs(z) % 3) * 0.15);
+  makeTree(47, z, 0.9 + (Math.abs(z) % 4) * 0.12);
+}
+for (let x = -35; x <= 35; x += 14) {
+  makeTree(x, 28, 1.1);
+}
+
+// ---- Joueurs (formes simples pour l'instant) ----
+const SKINS = [0xf1c27d, 0xc68642, 0x8d5524, 0x5c3a21, 0xe0ac69, 0x3b2417];
+const HAIRS = [0xc9a24a, 0x2b1a0e, 0x0d0d0d, 0x6b4423, 0x111111, 0x0b0b0b];
+let lookIdx = 0; // chaque joueur créé prend l'apparence suivante
+// ===== Joueur humain : silhouette, maillot, short, chaussettes, crampons, visage =====
+function makePlayerMesh(shirt, shorts, num, numColor) {
+  const g = new THREE.Group();
+  g.rotation.order = 'YXZ'; // incline le corps vers l'avant sans casser l'orientation
+  const look = lookIdx++;
+  const skinCol = SKINS[look % SKINS.length], hairCol = HAIRS[look % HAIRS.length];
+  const skin = mat(skinCol, 0.75);
+  const shirtM = mat(shirt, 0.8), shortsM = mat(shorts, 0.85), sockM = mat(shirt, 0.85);
+  const trimM = mat(shorts, 0.8);   // liseré : col et bande des chaussettes
+  const bootM = mat(0x121212, 0.5); // crampons
+  const u = g.userData = { phase: Math.random() * 6.28, amp: 0, legs: [], shins: [], feet: [], arms: [], elbows: [] };
+  const part = (geo, m, parent, x, y, z, shadow) => {
+    const p = new THREE.Mesh(geo, m);
+    p.position.set(x, y, z);
+    p.castShadow = !!shadow;
+    parent.add(p);
+    return p;
+  };
+
+  // ---- Jambes (articulations : hanche > genou > cheville) ----
+  for (const sx of [-0.3, 0.3]) {
+    const hip = new THREE.Group(); hip.position.set(sx, 1.4, 0); g.add(hip);
+    part(new THREE.CylinderGeometry(0.26, 0.22, 0.7, 10), skin, hip, 0, -0.35, 0, true);       // cuisse
+    part(new THREE.CylinderGeometry(0.31, 0.3, 0.42, 10), shortsM, hip, 0, -0.17, 0, false);   // jambe du short
+    const knee = new THREE.Group(); knee.position.y = -0.7; hip.add(knee);
+    part(new THREE.SphereGeometry(0.21, 10, 8), skin, knee, 0, 0, 0, false);                   // genou
+    part(new THREE.CylinderGeometry(0.2, 0.14, 0.6, 10), sockM, knee, 0, -0.3, 0, true);       // chaussette
+    part(new THREE.CylinderGeometry(0.205, 0.2, 0.07, 10), trimM, knee, 0, -0.08, 0, false);   // bande
+    const ankle = new THREE.Group(); ankle.position.y = -0.59; knee.add(ankle);
+    part(new THREE.BoxGeometry(0.34, 0.2, 0.5), bootM, ankle, 0, 0.01, 0.08, true);            // chaussure
+    const toe = part(new THREE.SphereGeometry(0.17, 10, 8), bootM, ankle, 0, 0.01, 0.3, false); // bout arrondi
+    toe.scale.set(1, 0.95, 1.15);
+    u.legs.push(hip); u.shins.push(knee); u.feet.push(ankle);
+  }
+
+  // ---- Buste, bassin, cou ----
+  const torso = part(new THREE.CylinderGeometry(0.8, 0.58, 1.15, 16), shirtM, g, 0, 2.4, 0, true);
+  torso.scale.z = 0.6; // buste aplati d'avant en arrière
+  const pelvis = part(new THREE.CylinderGeometry(0.6, 0.62, 0.62, 16), shortsM, g, 0, 1.55, 0, true);
+  pelvis.scale.z = 0.66;
+  const yoke = part(new THREE.SphereGeometry(0.62, 14, 8), shirtM, g, 0, 2.95, 0, false);
+  yoke.scale.set(1.25, 0.25, 0.72); // épaules arrondies
+  part(new THREE.CylinderGeometry(0.15, 0.17, 0.3, 10), skin, g, 0, 3.13, 0, false); // cou
+  const collar = part(new THREE.TorusGeometry(0.2, 0.045, 6, 16), trimM, g, 0, 3.1, 0, false);
+  collar.rotation.x = Math.PI / 2; // col
+
+  // ---- Bras (épaule > coude) ----
+  for (const sx of [-0.92, 0.92]) {
+    const shoulder = new THREE.Group(); shoulder.position.set(sx, 2.85, 0); g.add(shoulder);
+    part(new THREE.SphereGeometry(0.22, 10, 8), shirtM, shoulder, 0, 0, 0, false);           // épaule
+    part(new THREE.CylinderGeometry(0.14, 0.12, 0.45, 8), skin, shoulder, 0, -0.225, 0, false); // bras
+    part(new THREE.CylinderGeometry(0.2, 0.185, 0.28, 10), shirtM, shoulder, 0, -0.15, 0, true); // manche courte
+    const elbow = new THREE.Group(); elbow.position.y = -0.45; shoulder.add(elbow);
+    part(new THREE.SphereGeometry(0.125, 8, 6), skin, elbow, 0, 0, 0, false);
+    part(new THREE.CylinderGeometry(0.12, 0.09, 0.5, 8), skin, elbow, 0, -0.25, 0, false);   // avant-bras
+    const hand = part(new THREE.SphereGeometry(0.12, 8, 6), skin, elbow, 0, -0.56, 0, false); // main
+    hand.scale.set(0.85, 1.15, 0.7);
+    u.arms.push(shoulder); u.elbows.push(elbow);
+  }
+
+  // ---- Tête ----
+  const headG = new THREE.Group();
+  headG.position.y = 3.55; headG.scale.setScalar(0.95); // 0.95 = taille de la tête
+  g.add(headG);
+  const skull = part(new THREE.SphereGeometry(0.42, 20, 14), skin, headG, 0, 0, 0, true);
+  skull.scale.set(0.88, 1.05, 0.95);
+  for (const ex of [-1, 1]) {
+    const ear = part(new THREE.SphereGeometry(0.075, 8, 6), skin, headG, ex * 0.37, -0.04, 0, false);
+    ear.scale.set(0.5, 1, 0.8);
+  }
+
+  // Visage : dessiné sur une texture collée sur l'avant de la tête (1 seule pièce)
+  const fc = document.createElement('canvas'); fc.width = 128; fc.height = 192;
+  const f = fc.getContext('2d');
+  f.lineCap = 'round';
+  f.strokeStyle = new THREE.Color(hairCol).multiplyScalar(0.7).getStyle(); f.lineWidth = 5;
+  f.beginPath(); f.moveTo(16, 41); f.lineTo(43, 45); f.stroke();      // sourcils
+  f.beginPath(); f.moveTo(112, 41); f.lineTo(85, 45); f.stroke();
+  for (const ex of [29, 99]) {                                       // yeux
+    f.fillStyle = '#f2f2f2'; f.beginPath(); f.ellipse(ex, 70, 14, 8, 0, 0, 6.283); f.fill();
+    f.fillStyle = '#1b1b1b'; f.beginPath(); f.arc(ex, 70, 6, 0, 6.283); f.fill();
+    f.fillStyle = '#fff'; f.fillRect(ex - 3, 66, 2, 2);
+  }
+  f.fillStyle = 'rgba(0,0,0,0.2)'; f.beginPath(); f.ellipse(64, 104, 10, 6, 0, 0, 6.283); f.fill(); // nez
+  f.fillStyle = 'rgba(0,0,0,0.35)'; f.fillRect(57, 105, 4, 3); f.fillRect(67, 105, 4, 3);
+  f.strokeStyle = 'rgba(40,10,10,0.85)'; f.lineWidth = 3.5;                                         // bouche
+  f.beginPath(); f.moveTo(44, 145); f.quadraticCurveTo(64, 152, 84, 145); f.stroke();
+  const face = new THREE.Mesh(
+    new THREE.SphereGeometry(0.428, 20, 14, Math.PI / 2 - 0.75, 1.5, 1.0, 1.25),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(fc), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
+  );
+  face.scale.set(0.88, 1.05, 0.95);
+  headG.add(face);
+
+  // Cheveux : 0 = courts, 1 = volumineux, 2 = rasés
+  const style = look % 3;
+  const hairM = mat(hairCol, 0.9);
+  let hair;
+  if (style === 2) {
+    hair = new THREE.Mesh(new THREE.SphereGeometry(0.43, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.45), hairM);
+    hair.rotation.x = -0.5;
+  } else if (style === 1) {
+    hair = new THREE.Mesh(new THREE.SphereGeometry(0.52, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.55), hairM);
+    hair.rotation.x = -0.7; hair.position.set(0, 0.03, -0.03);
+  } else {
+    hair = new THREE.Mesh(new THREE.SphereGeometry(0.45, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.52), hairM);
+    hair.rotation.x = -0.6;
+  }
+  hair.scale.set(style === 1 ? 0.95 : 0.88, 1.05, style === 1 ? 1 : 0.95);
+  headG.add(hair);
+
+  // ---- Numéro : dans le dos et sur la poitrine ----
+  const nc = document.createElement('canvas'); nc.width = nc.height = 64;
+  const nx = nc.getContext('2d');
+  nx.fillStyle = numColor; nx.font = 'bold 48px sans-serif';
+  nx.textAlign = 'center'; nx.textBaseline = 'middle';
+  nx.fillText(num, 32, 34);
+  const numM = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(nc), transparent: true });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.95), numM);
+  back.position.set(0, 2.45, -0.44); back.rotation.y = Math.PI; g.add(back);
+  const chest = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5), numM);
+  chest.position.set(0, 2.5, 0.445); g.add(chest);
+
+  scene.add(g);
+  return g;
+}
+
+// Ancienne version : plus utilisée, à supprimer plus tard
+function makePlayerMeshOld(shirt, shorts, num, numColor) {
+  const g = new THREE.Group();
+    const look = lookIdx++;
+  const skinCol = SKINS[look % SKINS.length], hairCol = HAIRS[look % HAIRS.length];
+  const skin = mat(skinCol, 0.7);
+   g.rotation.order = 'YXZ'; // permet d'incliner le corps vers l'avant sans casser l'orientation
+  const shoeMat = mat(0x151515, 0.6), sockMat = mat(shirt, 0.8), sleeveMat = mat(shirt, 0.8);
+  const u = g.userData = { phase: Math.random() * 6.28, amp: 0, legs: [], shins: [], feet: [], arms: [], elbows: [] };
+  for (const sx of [-0.3, 0.3]) {
+    const hip = new THREE.Group(); hip.position.set(sx, 1.4, 0); g.add(hip);
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.23, 0.7, 8), skin);
+    thigh.position.y = -0.35; thigh.castShadow = true; hip.add(thigh);
+    const knee = new THREE.Group(); knee.position.y = -0.7; hip.add(knee);
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.19, 0.6, 8), sockMat);
+    shin.position.y = -0.3; shin.castShadow = true; knee.add(shin);
+    const ankle = new THREE.Group(); ankle.position.y = -0.59; knee.add(ankle);
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.22, 0.75), shoeMat);
+    shoe.position.z = 0.15; shoe.castShadow = true; ankle.add(shoe);
+    u.legs.push(hip); u.shins.push(knee); u.feet.push(ankle);
+  }
+  for (const sx of [-0.92, 0.92]) {
+    const shoulder = new THREE.Group(); shoulder.position.set(sx, 2.85, 0); g.add(shoulder);
+    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.15, 0.45, 8), sleeveMat);
+    sleeve.position.y = -0.225; sleeve.castShadow = true; shoulder.add(sleeve);
+    const elbow = new THREE.Group(); elbow.position.y = -0.45; shoulder.add(elbow);
+    const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.11, 0.5, 8), skin);
+    fore.position.y = -0.25; elbow.add(fore);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), skin);
+    hand.position.y = -0.52; elbow.add(hand);
+    u.arms.push(shoulder); u.elbows.push(elbow);
+  }
+  const sh = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.6, 0.55, 12), mat(shorts));
+  sh.position.y = 1.475; sh.castShadow = true; g.add(sh);
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.65, 1.25, 12), mat(shirt));
+  torso.position.y = 2.375; torso.castShadow = true; g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12), skin);
+    head.position.y = 3.5; head.castShadow = true; g.add(head);
+
+  // Visage (le devant du joueur est le côté +z)
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  for (const ex of [-0.17, 0.17]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), white);
+    eye.position.set(ex, 3.54, 0.44); g.add(eye);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), dark);
+    pupil.position.set(ex, 3.54, 0.5); g.add(pupil);
+  }
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), mat(new THREE.Color(skinCol).multiplyScalar(0.85), 0.7));
+  nose.position.set(0, 3.44, 0.5); g.add(nose);
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.035, 0.04), dark);
+  mouth.position.set(0, 3.32, 0.465); g.add(mouth);
+
+  // Cheveux : un joueur sur trois a les cheveux rasés
+  const buzz = look % 3 === 2;
+  const hair = new THREE.Mesh(
+    new THREE.SphereGeometry(buzz ? 0.515 : 0.545, 16, 10, 0, Math.PI * 2, 0, Math.PI * (buzz ? 0.42 : 0.55)),
+    mat(hairCol, 0.9)
+  );
+  hair.position.y = 3.5; hair.rotation.x = buzz ? -0.3 : -0.45; hair.castShadow = true; g.add(hair);
+
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const cx = c.getContext('2d');
+  cx.fillStyle = numColor; cx.font = 'bold 48px sans-serif';
+  cx.textAlign = 'center'; cx.textBaseline = 'middle';
+  cx.fillText(num, 32, 34);
+  const tag = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.9, 0.9),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true })
+  );
+  tag.position.set(0, 2.4, -0.73); tag.rotation.y = Math.PI; g.add(tag);
+
+  scene.add(g);
+  return g;
+}
+
+const allField = [...homeField, ...awayField];
+for (const e of allField) {
+  e.mesh = makePlayerMesh(e.color, e.side === 'home' ? '#1b1b1b' : '#f5f5f5', e.label, e.side === 'home' ? '#000' : '#fff');
+}
+homeGK.mesh = makePlayerMesh('#42a5f5', '#1b1b1b', '1', '#fff');
+awayGK.mesh = makePlayerMesh('#42a5f5', '#1b1b1b', '1', '#fff');
+
+// ---- Repère du joueur contrôlé ----
+const marker = new THREE.Mesh(new THREE.RingGeometry(1.7, 2.0, 32), new THREE.MeshBasicMaterial({ color: 0x00e5ff, side: THREE.DoubleSide }));
+marker.rotation.x = -Math.PI / 2; scene.add(marker);
+
+// ---- Ballon ----
+function makeBallTexture() {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 128, 64);
+  g.fillStyle = '#222';
+  for (let i = 0; i < 6; i++) for (let j = 0; j < 2; j++) {
+    g.beginPath(); g.arc(11 + i * 21 + j * 10, 16 + j * 32, 6, 0, 7); g.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+const ballMesh = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12), new THREE.MeshStandardMaterial({ map: makeBallTexture(), roughness: 0.6 }));
+ballMesh.castShadow = true;
+scene.add(ballMesh);
+
+// ---- Synchronisation jeu (x, y) -> 3D (x, z) ----
+// La vitesse réelle du joueur pilote la foulée
+function animateRunner(m, px, pz, dt) {
+  const u = m.userData;
+  const dist = Math.hypot(px - m.position.x, pz - m.position.z);
+  const spd = (dt > 0 && dist < 3) ? dist / dt : 0; // unités 3D / seconde (dist >= 3 = téléportation après un but)
+  m.position.x = px; m.position.z = pz;
+  const target = spd < 1 ? 0 : Math.min(spd / 14, 1.7); // 14 = vitesse normale, 1.7 = sprint
+  u.amp += (target - u.amp) * Math.min(1, dt * 10);
+  const a = u.amp;
+  u.phase += dt * (7 + 6 * a);
+
+  const s = Math.sin(u.phase), c = Math.cos(u.phase);
+  const swing = 0.5 * Math.min(a, 1) + 0.4 * Math.max(0, a - 1); // amplitude de la cuisse
+  const kneeMax = 1.2 * Math.min(a, 1.3);
+  const armSwing = 0.8 * Math.min(a, 1.3);
+  for (let i = 0; i < 2; i++) {
+    const sg = i === 0 ? 1 : -1; // les deux jambes sont en opposition
+    const th = -s * sg * swing;                    // négatif = jambe vers l'avant
+    const kn = Math.max(0, c * sg) * kneeMax;      // genou plié quand la jambe revient vers l'avant
+    u.legs[i].rotation.x = th;
+    u.shins[i].rotation.x = kn;
+    u.feet[i].rotation.x = -(th + kn) * 0.6;      // le pied reste presque à plat
+    u.arms[i].rotation.x = s * sg * armSwing;      // bras opposé à la jambe du même côté
+    u.elbows[i].rotation.x = -(0.25 + 0.7 * Math.min(a, 1));
+  }
+  m.position.y = -1.4 * (1 - Math.cos(swing * Math.abs(s))); // le bassin descend quand les jambes s'écartent
+  m.rotation.x = 0.16 * Math.min(a, 1.3);                    // penché vers l'avant
+}
+const KICK_DUR = 0.34;
+const FALL_DUR = 1.2; // durée totale de la chute d'un joueur tacle (secondes)
+let kickHold = 0; // le ballon reste au pied jusqu'à l'impact
+
+function triggerKick(e, power, hold) {
+  const m = e.mesh;
+  if (!m || e.slideT > 0) return;
+  const u = m.userData;
+  u.kickFrom = Math.max(u.wind || 0, 0.55); // point de départ = armement déjà fait
+  u.kickPow = power;
+  u.kickT = KICK_DUR;
+  u.wind = 0;
+  if (hold) kickHold = 0.05;
+}
+
+function applyActions(e, m, u, dt) {
+  if (e !== player && e.slideT > 0) e.slideT = 0; // contrôle passé à un autre joueur
+  const slideOn = e.slideT > 0;
+  const sp = slideOn ? 1 - e.slideT / SLIDE_DUR : 1;
+  const w = slideOn ? Math.max(0, Math.min(1, sp / 0.15, (1 - sp) / 0.3)) : 0; // descend vite, se relève
+  u.slideW = w;
+
+  // ---- Frappe : armement pendant la charge, puis coup de pied ----
+   const wt = (e === player && charging) ? 0.35 + 0.65 * shootCharge : (e === player && passCharging) ? 0.35 + 0.4 * passCharge : 0;
+  u.wind = (u.wind || 0) + (wt - (u.wind || 0)) * Math.min(1, dt * 12);
+  let kw = 0, hip = 0, knee = 0, foot = 0, lean = 0;
+  if (u.kickT > 0 && !slideOn) {
+    u.kickT -= dt;
+    const p = 1 - Math.max(u.kickT, 0) / KICK_DUR;
+    const back = 0.6 * u.kickFrom, front = -(0.7 + 0.6 * u.kickPow);
+    if (p < 0.18) {
+      const q = p / 0.18;
+      hip = back + (front - back) * q;
+      knee = 1.2 * u.kickFrom * (1 - q) + 0.05;
+      foot = 0.35 * q;
+    } else {
+      hip = front + 0.3 * (p - 0.18);
+      knee = 0.05; foot = 0.35;
+    }
+    kw = p < 0.7 ? 1 : Math.max(0, (1 - p) / 0.3);
+    lean = -0.12;
+  } else if (u.wind > 0.02 && !slideOn) {
+    hip = 0.6 * u.wind; knee = 1.2 * u.wind;
+    kw = Math.min(1, u.wind * 2.5);
+    lean = -0.1 * u.wind;
+  }
+  if (kw > 0) {
+    const mk = (o, v) => { o.rotation.x += (v - o.rotation.x) * kw; };
+    mk(u.legs[1], hip); mk(u.shins[1], knee); mk(u.feet[1], -(hip + knee) * 0.6 + foot);
+    mk(u.shins[0], 0.3);                       // jambe d'appui légèrement fléchie
+    mk(u.arms[0], -0.8); mk(u.arms[1], 0.5);   // bras opposé vers l'avant
+    m.rotation.x += lean * kw;
+  }
+
+    // Bras écartés pour l'équilibre pendant la frappe
+  u.arms[0].rotation.z = -1.1 * kw;
+  u.arms[1].rotation.z = 1.1 * kw;
+
+  // ---- Tacle glissé ----
+  if (w > 0) {
+    const mx = (o, v) => { o.rotation.x += (v - o.rotation.x) * w; };
+    mx(u.legs[1], -0.55); mx(u.shins[1], 0); mx(u.feet[1], 0.9);  // jambe tendue vers l'avant
+    mx(u.legs[0], -0.35); mx(u.shins[0], 2.6); mx(u.feet[0], -1.0); // jambe repliée dessous
+    mx(u.arms[0], 1.7); mx(u.arms[1], 1.7);                        // bras en arrière pour l'appui
+    mx(u.elbows[0], -0.2); mx(u.elbows[1], -0.2);
+    m.rotation.x += (-1.2 - m.rotation.x) * w;                     // buste renversé en arrière
+    m.position.y += (-0.1 - m.position.y) * w;                     // bassin près du sol
+  }
+  // Le corps couché est recentré vers l'avant (retiré avant le calcul de vitesse de l'image suivante)
+    // ---- Chute : le joueur tacle trebuche vers l'avant ----
+  let fw = 0;
+  if (e.fallT > 0) {
+    const fp = 1 - e.fallT / FALL_DUR;
+    fw = Math.max(0, Math.min(1, fp / 0.18, (1 - fp) / 0.3)); // tombe vite, reste au sol, se relève
+    fw = fw * fw * (3 - 2 * fw);
+  }
+  u.fallW = fw;
+  if (fw > 0) {
+    const mf = (o, v) => { o.rotation.x += (v - o.rotation.x) * fw; };
+    mf(u.legs[0], 0.5); mf(u.shins[0], 1.4); mf(u.feet[0], 0.4);   // une jambe repliée en arrière
+    mf(u.legs[1], 0.15); mf(u.shins[1], 0.5); mf(u.feet[1], 0);
+    mf(u.arms[0], -2.6); mf(u.arms[1], -2.6);                      // bras tendus vers l'avant
+    mf(u.elbows[0], -0.3); mf(u.elbows[1], -0.3);
+    m.rotation.x += (1.5 - m.rotation.x) * fw;                     // à plat ventre
+    m.position.y += (0.75 - m.position.y) * fw;                    // le corps repose sur le sol
+  }
+  const off = 1.4 * w - 2.0 * fw;
+  u.offX = Math.sin(m.rotation.y) * off; u.offZ = Math.cos(m.rotation.y) * off;
+  m.position.x += u.offX; m.position.z += u.offZ;
+}
+
+function syncPlayerMesh(e, t, dt) {
+  const m = e.mesh, u = m.userData;
+  m.position.x -= u.offX || 0; m.position.z -= u.offZ || 0;
+  animateRunner(m, wx(e.x), wz(e.y), dt);
+  // Le corps tourne progressivement vers sa direction
+  let d = Math.atan2(e.facingX, e.facingY) - m.rotation.y;
+  d = Math.atan2(Math.sin(d), Math.cos(d));
+  m.rotation.y += d * Math.min(1, dt * 14);
+  applyActions(e, m, u, dt);
+}
+function syncGK(gk, angle, dt) {
+  animateRunner(gk.mesh, wx(gk.x), wz(gk.y), dt);
+  gk.mesh.rotation.y = angle;
+}
+function toScreen(x, y, h) {
+  const v = new THREE.Vector3(wx(x), h, wz(y)).project(camera);
+   return { x: (v.x + 1) / 2 * UI_W, y: (1 - v.y) / 2 * H };
+}
+
+let camPrevT = 0;
+let ballPrevX = 0, ballPrevZ = 0, carryBlend = 0, carryX = 0, carryZ = 0, carryY = 0.5;
+function updateNetShake(mesh, timer, dir, dt) {
+  if (timer <= 0) { mesh.position.x = mesh.userData.restX; return timer; }
+  timer -= dt;
+  const amp = Math.max(timer, 0) * 1.4;
+  mesh.position.x = mesh.userData.restX + dir * Math.sin(timer * 26) * amp;
+  if (timer <= 0) mesh.position.x = mesh.userData.restX;
+  return timer;
+}
+
+function render3D(t) {
+  // La caméra glisse doucement vers le ballon (max 12 unités de chaque côté)
+  const dtc = Math.min(t - camPrevT, 0.05); camPrevT = t;
+  const camTarget = Math.max(-12, Math.min(12, wx(ball.x) * 0.5));
+  camX += (camTarget - camX) * Math.min(1, dtc * 4);
+  camera.position.x = camX;
+  camera.lookAt(camX, 0, 0);
+
+  homeNetShake = updateNetShake(homeNetBack, homeNetShake, -1, dtc);
+  awayNetShake = updateNetShake(awayNetBack, awayNetShake, 1, dtc);
+
+    for (const e of allField) syncPlayerMesh(e, t, dtc);
+  syncGK(homeGK, Math.PI / 2, dtc);
+  syncGK(awayGK, -Math.PI / 2, dtc);
+  marker.position.set(wx(player.x), 0.08, wz(player.y));
+
+    const bx = wx(ball.x), bz = wz(ball.y);
+  // Le roulement suit la position logique du ballon
+  ballMesh.rotation.z -= (bx - ballPrevX) / 0.5;
+  ballMesh.rotation.x += (bz - ballPrevZ) / 0.5;
+  ballPrevX = bx; ballPrevZ = bz;
+
+  // Porté : le ballon est touché à chaque foulée, en alternant les pieds
+  const cm = ball.carrier && ball.carrier.mesh;
+  if (cm) {
+    const cu = cm.userData, a = Math.min(cu.amp, 1);
+    const s = Math.sin(cu.phase), r = cm.rotation.y;
+        const d = 1.45 + 0.45 * Math.abs(s) * a - 0.55 * (cu.slideW || 0); // avance quand le pied est devant
+    const lat = -0.3 * s * a;                // passe d'un pied à l'autre
+    carryX = cm.position.x + Math.sin(r) * d + Math.cos(r) * lat;
+    carryZ = cm.position.z + Math.cos(r) * d - Math.sin(r) * lat;
+    carryY = 0.5 + 0.1 * a * Math.abs(Math.cos(cu.phase));
+    carryBlend = Math.min(1, carryBlend + dtc * 8);
+    } else if (kickHold <= 0) {
+    carryBlend = Math.max(0, carryBlend - dtc * 12); // le ballon quitte le pied en quelques images
+  }
+  if (kickHold > 0) kickHold -= dtc;
+  ballMesh.position.set(
+    bx + (carryX - bx) * carryBlend,
+    0.5 + (carryY - 0.5) * carryBlend,
+    bz + (carryZ - bz) * carryBlend
+  );
+
+  renderer.render(scene, camera);
+}
+
+function render() {
+  render3D(performance.now() / 1000);
+    ctx.clearRect(0, 0, UI_W, H);
+    drawPowerBar();
+  drawPassBar();
+  drawJoystick();
+  drawButtons();
+  drawHUD();
+}
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ---- Initialisation des positions ----
+setTimeout(() => document.getElementById('info').classList.add('hide'), 8000);
+for (const t of homeAI) placeAtAnchor(t);
+for (const o of awayAI) placeAtAnchor(o);
+ball.x = player.x + DRIBBLE_OFFSET; ball.y = player.y;
+
+requestAnimationFrame(loop);
+</script>
+<script src="decor.js"></script>
+</body>
+</html>
